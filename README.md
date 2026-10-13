@@ -26,7 +26,6 @@ Open the local URL printed by Streamlit. The first image identification download
    | --- | --- | --- |
    | `BOOTSTRAP_ADMIN_EMAIL` | Yes | Email address for the initial administrator |
    | `BOOTSTRAP_ADMIN_PASSWORD` | Yes | Password for the initial administrator, used when creating that account |
-   | `ADMIN_SIGNUP_EMAILS` | For admin signup | Comma-separated list of approved admin addresses |
    | `ADMIN_EMAILS` | No | Comma-separated recipients for new-report notifications |
    | `SMTP_HOST` | No | SMTP server host; leave unset to disable email |
    | `SMTP_PORT` | No | SMTP port; defaults to `587` |
@@ -39,7 +38,7 @@ Open the local URL printed by Streamlit. The first image identification download
 
    Set secrets through Render's environment settings, not in source control. The `PORT` variable is supplied by Render and is used by the Docker command.
 
-5. Deploy. On the first startup the administrator account is created from the bootstrap variables. If the account already exists, its current password must match `BOOTSTRAP_ADMIN_PASSWORD` before it can be promoted. To enable additional admin signup, set `ADMIN_SIGNUP_EMAILS` to a comma-separated allowlist of approved administrator email addresses. Set `APP_BASE_URL` to the deployed HTTPS URL to enable QR creation.
+5. Deploy. On the first startup the administrator account is created from the bootstrap variables. If the account already exists, its current password must match `BOOTSTRAP_ADMIN_PASSWORD` before it can be promoted. Additional administrator accounts can be created through admin signup with any valid email address after the local name/DOB OCR checks pass. Set `APP_BASE_URL` to the deployed HTTPS URL to enable QR creation.
 6. Open the public URL shown on the Render service page and test sign-in, a report submission, the **My Reports** page, and the **Mark my report as done** action. Users can complete their own reports; admins can complete any report. Completion is visible and can be filtered in Saved Reports.
 
 For persistent SQLite storage, run only one service instance. This app is not configured for multiple replicas or concurrent shared-disk database access. Keep the admin password and SMTP credentials private, and rotate them in the provider if they are exposed.
@@ -54,7 +53,7 @@ Set `APP_DATA_DIR` to a writable persistent directory to keep the SQLite databas
 
 ## Features and privacy
 
-- Student and admin login are separate. Student signup always creates a student account. Additional admin signup is limited to addresses in the `ADMIN_SIGNUP_EMAILS` allowlist and does not use email OTP. Configure the first administrator with `BOOTSTRAP_ADMIN_EMAIL` and `BOOTSTRAP_ADMIN_PASSWORD`; if that email already belongs to an account, the configured password must verify before the account is promoted.
+- Student and admin login are separate. Student signup always creates a student account. Additional admin signup accepts any valid email address and requires the existing local OCR name/DOB text-match and age checks; it does not use email OTP. OCR cannot establish that an identity document is genuine. Configure the first administrator with `BOOTSTRAP_ADMIN_EMAIL` and `BOOTSTRAP_ADMIN_PASSWORD`; if that email already belongs to an account, the configured password must verify before the account is promoted.
 - Signup checks that the applicant is at least 23 based on the date of birth entered. The date is used for the check and is not saved in the account database. This is a self-reported DOB check, not Aadhaar verification. Do not collect Aadhaar numbers here; actual Aadhaar verification requires an authorized UIDAI verification provider and separate privacy/legal review.
 - Admin signup accepts a card photo for local OCR text matching against the entered name and DOB. The image is uploaded to this app server for in-memory processing only; it is not written to disk or the database, and OCR is not sent to a third-party service. Extracted text is not displayed, logged, or stored. OCR may be wrong and cannot establish that a document is genuine, belongs to the applicant, or is Aadhaar-authenticated. This is a text consistency check, not identity verification.
 - Profiles can store roll number, department, year of study, and optional phone number. Roll numbers remain strings (including leading zeroes), are never returned by student-facing database queries, and are only searchable by a recently reauthenticated administrator. No roll-number format or uniqueness rule is assumed unless configured below.
@@ -71,7 +70,6 @@ Set `APP_DATA_DIR` to a writable persistent directory to keep the SQLite databas
 | `APP_DATA_DIR` | App folder locally; `/var/data` in Docker | Writable directory for database, backups, photos, and data |
 | `BOOTSTRAP_ADMIN_EMAIL` | unset | Email for first admin provisioning |
 | `BOOTSTRAP_ADMIN_PASSWORD` | unset | Existing-account verification or initial admin password; store as a secret |
-| `ADMIN_SIGNUP_EMAILS` | unset | Comma-separated allowlist of admin signup email addresses |
 | `TESSERACT_CMD` | `tesseract` | Local Tesseract OCR executable path, if not on PATH |
 | `ROLL_NUMBER_REGEX` | unset | Optional Python regular expression for the college's exact roll-number format |
 | `ROLL_NUMBER_UNIQUE` | `false` | Set to `true` only if college rules require uniqueness; migration fails safely on existing duplicates |

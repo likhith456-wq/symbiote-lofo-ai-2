@@ -315,13 +315,10 @@ def render_login_page():
                     st.success("Student account created.")
                     st.rerun()
     with admin_signup_tab:
-        st.caption("Admin signup is limited to addresses approved by the repository owner.")
-        admin_signup_allowlist = os.getenv("ADMIN_SIGNUP_EMAILS", "")
-        if not admin_signup_allowlist.strip():
-            st.warning(
-                "Admin signup is disabled until approved addresses are listed in "
-                "ADMIN_SIGNUP_EMAILS."
-            )
+        st.caption(
+            "Anyone may apply using any valid email address. The uploaded image is "
+            "checked locally for matching name and date-of-birth text."
+        )
         with st.form("admin_signup_form"):
             name = st.text_input("Administrator name", max_chars=120)
             email = st.text_input("Administrator email", max_chars=254)
@@ -349,7 +346,6 @@ def render_login_page():
             confirmation = st.text_input("Confirm password", type="password")
             submitted = st.form_submit_button(
                 "Create administrator account",
-                disabled=not bool(admin_signup_allowlist.strip()),
             )
         if submitted:
             if (
@@ -366,12 +362,6 @@ def render_login_page():
                 st.warning("Use a password with at least 12 characters.")
             elif password != confirmation:
                 st.warning("Passwords do not match.")
-            elif email.strip().lower() not in {
-                approved.strip().lower()
-                for approved in admin_signup_allowlist.split(",")
-                if approved.strip()
-            }:
-                st.error("This email address is not approved for administrator signup.")
             else:
                 try:
                     identity_check = check_identity_document(
@@ -397,15 +387,12 @@ def render_login_page():
                         )
                     else:
                         try:
-                            user = db.create_allowlisted_admin(
+                            user = db.create_admin(
                                 DB_PATH,
                                 name,
                                 email,
                                 hash_password(password),
-                                os.getenv("ADMIN_SIGNUP_EMAILS", ""),
                             )
-                        except db.AuthorizationError as error:
-                            st.error(str(error))
                         except (ValueError, db.sqlite3.IntegrityError):
                             st.error("An account with that email may already exist.")
                         else:

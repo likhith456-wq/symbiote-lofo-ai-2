@@ -231,41 +231,23 @@ class DatabaseTests(unittest.TestCase):
     def test_signup_is_always_student(self):
         self.assertEqual(self.other["role"], "student")
 
-    def test_admin_signup_is_allowlisted_without_otp(self):
-        with self.assertRaises(AuthorizationError):
-            database.create_allowlisted_admin(
-                self.db_path,
-                "New Admin",
-                "outside@example.edu",
-                hash_password("new-admin-password-123"),
-                "approved@example.edu",
-            )
-        with self.assertRaises(AuthorizationError):
-            database.create_allowlisted_admin(
-                self.db_path,
-                "New Admin",
-                "new-admin@example.edu",
-                hash_password("new-admin-password-123"),
-                "",
-            )
+    def test_admin_signup_accepts_any_email_without_promoting_existing_students(self):
         with self.assertRaises(sqlite3.IntegrityError):
-            database.create_allowlisted_admin(
+            database.create_admin(
                 self.db_path,
                 "Other Student",
                 "other@example.edu",
                 hash_password("different-password-123"),
-                "other@example.edu",
             )
         self.assertEqual(
             database.find_user_by_email(self.db_path, "other@example.edu")["role"],
             "student",
         )
-        admin = database.create_allowlisted_admin(
+        admin = database.create_admin(
             self.db_path,
             "New Admin",
             " New-Admin@example.edu ",
             hash_password("new-admin-password-123"),
-            "other@example.edu, new-admin@example.edu",
         )
         self.assertEqual(admin["role"], "admin")
 

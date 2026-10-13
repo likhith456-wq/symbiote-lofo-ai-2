@@ -496,22 +496,8 @@ def create_student(db_path, name, email, password_hash):
     return find_user_by_email(db_path, email)
 
 
-def _admin_signup_allowlist(configured_emails):
-    if not configured_emails:
-        return set()
-    if isinstance(configured_emails, str):
-        configured_emails = configured_emails.split(",")
-    return {
-        email.strip().lower()
-        for email in configured_emails
-        if email and email.strip()
-    }
-
-
-def create_allowlisted_admin(db_path, name, email, password_hash, configured_emails):
+def create_admin(db_path, name, email, password_hash):
     email = email.strip().lower()
-    if email not in _admin_signup_allowlist(configured_emails):
-        raise AuthorizationError("Email is not approved for administrator signup.")
     with connection(db_path, begin_immediate=True) as conn:
         conn.execute(
             """
