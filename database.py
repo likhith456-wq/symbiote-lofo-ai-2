@@ -1,5 +1,8 @@
 import os
 import re
+import hashlib
+import hmac
+import secrets
 import shutil
 import sqlite3
 import time
@@ -16,7 +19,7 @@ from security import (
 )
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 WORKFLOW_STATUSES = (
     "Open",
     "Under Review",
@@ -300,6 +303,22 @@ def _ensure_roll_number_unique_index(conn):
     )
 
 
+def _migrate_v2(conn):
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS admin_signup_otps (
+            email TEXT PRIMARY KEY,
+            code_hash TEXT NOT NULL,
+            expires_at INTEGER NOT NULL,
+            attempts_left INTEGER NOT NULL,
+            window_started_at INTEGER NOT NULL,
+            send_count INTEGER NOT NULL,
+            last_sent_at INTEGER NOT NULL
+        )
+        """
+    )
+
+
 def migrate_database(db_path, data_dir=None, *, backup=True):
     db_path = Path(db_path).resolve()
     data_dir = Path(data_dir or db_path.parent).resolve()
@@ -351,6 +370,13 @@ def migrate_database(db_path, data_dir=None, *, backup=True):
             conn.execute(
                 "INSERT INTO schema_version(version, applied_at) VALUES (?, ?)",
                 (1, utc_now()),
+            )
+            version = 1
+        if version < 2:
+            _migrate_v2(conn)
+            conn.execute(
+                "INSERT INTO schema_version(version, applied_at) VALUES (?, ?)",
+                (2, utc_now()),
             )
         _ensure_roll_number_unique_index(conn)
     return SCHEMA_VERSION
@@ -462,26 +488,182 @@ def create_student(db_path, name, email, password_hash):
     return find_user_by_email(db_path, email)
 
 
-def is_valid_admin_invitation(invitation, configured_invitation):
-    import hmac
+def _admin_signup_allowlist(configured_emails):
+    if not configured_emails:
+        return set()
+    if isinstance(configured_emails, str):
+        configured_emails = configured_emails.split(",")
+    return {
+        email.strip().lower()
+        for email in configured_emails
+        if email and email.strip()
+    }
 
-    return bool(configured_invitation and invitation) and hmac.compare_digest(
-        invitation,
-        configured_invitation,
-    )
+
+def _admin_otp_hash(email, code, otp_secret):
+    payload = f"{email}:{code}".encode("utf-8")
+    return hmac.new(otp_secret.encode("utf-8"), payload, hashlib.sha256).hexdigest()
 
 
-def create_invited_admin(db_path, name, email, password_hash, invitation, configured_invitation):
-    if not is_valid_admin_invitation(invitation, configured_invitation):
-        raise AuthorizationError("A valid administrator invitation is required.")
+def issue_admin_signup_otp(
+    db_path,
+    email,
+    configured_emails,
+    otp_secret,
+    *,
+    now=None,
+):
+    email = email.strip().lower()
+    if email not in _admin_signup_allowlist(configured_emails):
+        return None
+    if not otp_secret or len(otp_secret) < 32:
+        raise ValueError("ADMIN_OTP_SECRET must contain at least 32 characters.")
+    now = int(time.time() if now is None else now)
+    code = f"{secrets.randbelow(100_000_000):08d}"
+
     with connection(db_path, begin_immediate=True) as conn:
+        row = conn.execute(
+            "SELECT window_started_at, send_count, last_sent_at "
+            "FROM admin_signup_otps WHERE email = ?",
+            (email,),
+        ).fetchone()
+        if row and now - row["window_started_at"] < 3600:
+            if row["send_count"] >= 5 or now - row["last_sent_at"] < 60:
+                return None
+            window_started_at = row["window_started_at"]
+            send_count = row["send_count"] + 1
+        else:
+            window_started_at = now
+            send_count = 1
         conn.execute(
             """
-            INSERT INTO users(name, email, password_hash, role, created_at)
-            VALUES (?, ?, ?, 'admin', ?)
+            INSERT INTO admin_signup_otps(
+                email, code_hash, expires_at, attempts_left,
+                window_started_at, send_count, last_sent_at
+            ) VALUES (?, ?, ?, 5, ?, ?, ?)
+            ON CONFLICT(email) DO UPDATE SET
+                code_hash=excluded.code_hash,
+                expires_at=excluded.expires_at,
+                attempts_left=excluded.attempts_left,
+                window_started_at=excluded.window_started_at,
+                send_count=excluded.send_count,
+                last_sent_at=excluded.last_sent_at
             """,
-            (name.strip(), email.strip().lower(), password_hash, utc_now()),
+            (
+                email,
+                _admin_otp_hash(email, code, otp_secret),
+                now + 600,
+                window_started_at,
+                send_count,
+                now,
+            ),
         )
+    return code
+
+
+def discard_admin_signup_otp(db_path, email):
+    with connection(db_path, begin_immediate=True) as conn:
+        conn.execute(
+            "DELETE FROM admin_signup_otps WHERE email = ?",
+            (email.strip().lower(),),
+        )
+
+
+def _consume_admin_signup_otp(conn, email, code, otp_secret, now):
+    row = conn.execute(
+        "SELECT code_hash, expires_at, attempts_left FROM admin_signup_otps WHERE email = ?",
+        (email,),
+    ).fetchone()
+    if not row:
+        return False
+    if row["expires_at"] <= now or row["attempts_left"] <= 0:
+        conn.execute("DELETE FROM admin_signup_otps WHERE email = ?", (email,))
+        return False
+    expected = _admin_otp_hash(email, code, otp_secret)
+    if not hmac.compare_digest(expected, row["code_hash"]):
+        attempts_left = row["attempts_left"] - 1
+        if attempts_left <= 0:
+            conn.execute("DELETE FROM admin_signup_otps WHERE email = ?", (email,))
+        else:
+            conn.execute(
+                "UPDATE admin_signup_otps SET attempts_left = ? WHERE email = ?",
+                (attempts_left, email),
+            )
+        return False
+    conn.execute("DELETE FROM admin_signup_otps WHERE email = ?", (email,))
+    return True
+
+
+def validate_admin_signup_otp(
+    db_path,
+    email,
+    code,
+    configured_emails,
+    otp_secret,
+    *,
+    now=None,
+):
+    email = email.strip().lower()
+    if email not in _admin_signup_allowlist(configured_emails):
+        return False
+    if not otp_secret or len(otp_secret) < 32:
+        raise ValueError("ADMIN_OTP_SECRET must contain at least 32 characters.")
+    now = int(time.time() if now is None else now)
+    with connection(db_path, begin_immediate=True) as conn:
+        row = conn.execute(
+            "SELECT code_hash, expires_at, attempts_left "
+            "FROM admin_signup_otps WHERE email = ?",
+            (email,),
+        ).fetchone()
+        if not row:
+            return False
+        if row["expires_at"] <= now or row["attempts_left"] <= 0:
+            conn.execute("DELETE FROM admin_signup_otps WHERE email = ?", (email,))
+            return False
+        expected = _admin_otp_hash(email, code, otp_secret)
+        if hmac.compare_digest(expected, row["code_hash"]):
+            return True
+        attempts_left = row["attempts_left"] - 1
+        if attempts_left <= 0:
+            conn.execute("DELETE FROM admin_signup_otps WHERE email = ?", (email,))
+        else:
+            conn.execute(
+                "UPDATE admin_signup_otps SET attempts_left = ? WHERE email = ?",
+                (attempts_left, email),
+            )
+    return False
+
+
+def create_admin_with_email_otp(
+    db_path,
+    name,
+    email,
+    password_hash,
+    code,
+    configured_emails,
+    otp_secret,
+    *,
+    now=None,
+):
+    email = email.strip().lower()
+    if email not in _admin_signup_allowlist(configured_emails):
+        raise AuthorizationError("Email OTP verification failed.")
+    if not otp_secret or len(otp_secret) < 32:
+        raise ValueError("ADMIN_OTP_SECRET must contain at least 32 characters.")
+    now = int(time.time() if now is None else now)
+    otp_valid = False
+    with connection(db_path, begin_immediate=True) as conn:
+        otp_valid = _consume_admin_signup_otp(conn, email, code, otp_secret, now)
+        if otp_valid:
+            conn.execute(
+                """
+                INSERT INTO users(name, email, password_hash, role, created_at)
+                VALUES (?, ?, ?, 'admin', ?)
+                """,
+                (name.strip(), email, password_hash, utc_now()),
+            )
+    if not otp_valid:
+        raise AuthorizationError("Email OTP is invalid or expired.")
     return find_user_by_email(db_path, email)
 
 
