@@ -1,6 +1,5 @@
 import os
 import re
-import smtplib
 import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -236,36 +235,6 @@ def render_public_qr_page(token):
             st.rerun()
 
 
-def send_admin_signup_otp(recipient, code):
-    from email.message import EmailMessage
-
-    host = os.getenv("SMTP_HOST")
-    sender = os.getenv("SMTP_FROM_EMAIL", os.getenv("SMTP_USERNAME", ""))
-    if not host or not sender:
-        raise ValueError("SMTP_HOST and a sender email address are required.")
-    message = EmailMessage()
-    message["Subject"] = "Symbiote Lofo AI administrator signup code"
-    message["From"] = sender
-    message["To"] = recipient
-    message.set_content(
-        f"Your administrator signup code is {code}. "
-        "It expires in 10 minutes and can be used once. "
-        "If you did not request it, ignore this email."
-    )
-    with smtplib.SMTP(
-        host,
-        int(os.getenv("SMTP_PORT", "587")),
-        timeout=15,
-    ) as server:
-        if os.getenv("SMTP_USE_TLS", "true").lower() == "true":
-            server.starttls()
-        username = os.getenv("SMTP_USERNAME")
-        password = os.getenv("SMTP_PASSWORD")
-        if username and password:
-            server.login(username, password)
-        server.send_message(message, to_addrs=[recipient])
-
-
 def render_login_page():
     st.title("🔐 Symbiote Lofo AI")
     st.caption("Student and administrator access. Date of birth is checked for age and not saved to your account.")
@@ -346,49 +315,13 @@ def render_login_page():
                     st.success("Student account created.")
                     st.rerun()
     with admin_signup_tab:
-        st.caption(
-            "A one-time code is emailed to approved admin addresses before signup."
-        )
-        otp_configured = all(
-            (
-                os.getenv("ADMIN_SIGNUP_EMAILS"),
-                len(os.getenv("ADMIN_OTP_SECRET", "")) >= 32,
-                os.getenv("SMTP_HOST"),
-                os.getenv("SMTP_FROM_EMAIL") or os.getenv("SMTP_USERNAME"),
-            )
-        )
-        if not otp_configured:
+        st.caption("Admin signup is limited to addresses approved by the repository owner.")
+        admin_signup_allowlist = os.getenv("ADMIN_SIGNUP_EMAILS", "")
+        if not admin_signup_allowlist.strip():
             st.warning(
-                "Email verification is not configured. Ask the repository owner to "
-                "set ADMIN_SIGNUP_EMAILS, ADMIN_OTP_SECRET, and SMTP settings."
+                "Admin signup is disabled until approved addresses are listed in "
+                "ADMIN_SIGNUP_EMAILS."
             )
-        with st.form("admin_otp_request_form"):
-            otp_email = st.text_input("Approved administrator email", max_chars=254)
-            request_code = st.form_submit_button(
-                "Send email verification code",
-                disabled=not otp_configured,
-            )
-        if request_code:
-            if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", otp_email.strip()):
-                st.warning("Enter a valid email address.")
-            else:
-                try:
-                    code = db.issue_admin_signup_otp(
-                        DB_PATH,
-                        otp_email,
-                        os.getenv("ADMIN_SIGNUP_EMAILS", ""),
-                        os.getenv("ADMIN_OTP_SECRET", ""),
-                    )
-                    if code:
-                        send_admin_signup_otp(otp_email.strip(), code)
-                except (OSError, ValueError, smtplib.SMTPException) as error:
-                    db.discard_admin_signup_otp(DB_PATH, otp_email)
-                    st.error("Could not send a verification code. Check email settings and retry.")
-                else:
-                    st.info(
-                        "If that address is approved, a code has been sent. "
-                        "Check the inbox and spam folder."
-                    )
         with st.form("admin_signup_form"):
             name = st.text_input("Administrator name", max_chars=120)
             email = st.text_input("Administrator email", max_chars=254)
@@ -398,11 +331,6 @@ def render_login_page():
                 min_value=date(1900, 1, 1),
                 max_value=date.today(),
                 key="admin_signup_dob",
-            )
-            email_otp = st.text_input(
-                "Email verification code",
-                max_chars=8,
-                help="The one-time code expires after 10 minutes and allows five attempts.",
             )
             document_photo = st.file_uploader(
                 "Aadhaar photo for local name and DOB text matching",
@@ -421,7 +349,7 @@ def render_login_page():
             confirmation = st.text_input("Confirm password", type="password")
             submitted = st.form_submit_button(
                 "Create administrator account",
-                disabled=not otp_configured,
+                disabled=not bool(admin_signup_allowlist.strip()),
             )
         if submitted:
             if (
@@ -438,16 +366,12 @@ def render_login_page():
                 st.warning("Use a password with at least 12 characters.")
             elif password != confirmation:
                 st.warning("Passwords do not match.")
-            elif not re.fullmatch(r"\d{8}", email_otp.strip()):
-                st.warning("Enter the eight-digit email verification code.")
-            elif not db.validate_admin_signup_otp(
-                DB_PATH,
-                email,
-                email_otp.strip(),
-                os.getenv("ADMIN_SIGNUP_EMAILS", ""),
-                os.getenv("ADMIN_OTP_SECRET", ""),
-            ):
-                st.error("Email verification failed or the code expired. Request a new code.")
+            elif email.strip().lower() not in {
+                approved.strip().lower()
+                for approved in admin_signup_allowlist.split(",")
+                if approved.strip()
+            }:
+                st.error("This email address is not approved for administrator signup.")
             else:
                 try:
                     identity_check = check_identity_document(
@@ -473,14 +397,12 @@ def render_login_page():
                         )
                     else:
                         try:
-                            user = db.create_admin_with_email_otp(
+                            user = db.create_allowlisted_admin(
                                 DB_PATH,
                                 name,
                                 email,
                                 hash_password(password),
-                                email_otp.strip(),
                                 os.getenv("ADMIN_SIGNUP_EMAILS", ""),
-                                os.getenv("ADMIN_OTP_SECRET", ""),
                             )
                         except db.AuthorizationError as error:
                             st.error(str(error))

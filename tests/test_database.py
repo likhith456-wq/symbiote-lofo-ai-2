@@ -133,7 +133,7 @@ class DatabaseTests(unittest.TestCase):
                 conn.execute("SELECT COUNT(*) FROM report_status_history").fetchone()[0],
                 2,
             )
-        backups = list((self.root / "backups").glob("migration-v2-*"))
+        backups = list((self.root / "backups").glob("migration-v3-*"))
         self.assertEqual(len(backups), 1)
         self.assertTrue((backups[0] / self.db_path.name).is_file())
         self.assertEqual((backups[0] / "item_photos" / "legacy.jpg").read_bytes(), b"legacy photo")
@@ -231,115 +231,55 @@ class DatabaseTests(unittest.TestCase):
     def test_signup_is_always_student(self):
         self.assertEqual(self.other["role"], "student")
 
-    def test_admin_signup_otp_is_allowlisted_hashed_expiring_and_single_use(self):
-        secret = "test-only-otp-hmac-secret-with-32-bytes"
-        allowlist = "new-admin@example.edu, another-admin@example.edu"
-        with patch("database.secrets.randbelow", return_value=42):
-            code = database.issue_admin_signup_otp(
-                self.db_path,
-                "New-Admin@example.edu",
-                allowlist,
-                secret,
-                now=1000,
-            )
-        self.assertEqual(code, "00000042")
-        self.assertIsNone(
-            database.issue_admin_signup_otp(
-                self.db_path,
-                "outside@example.edu",
-                allowlist,
-                secret,
-                now=1000,
-            )
-        )
-        with database.connection(self.db_path) as conn:
-            otp_row = conn.execute(
-                "SELECT code_hash, attempts_left FROM admin_signup_otps WHERE email=?",
-                ("new-admin@example.edu",),
-            ).fetchone()
-        self.assertNotEqual(otp_row["code_hash"], code)
-        self.assertEqual(otp_row["attempts_left"], 5)
+    def test_admin_signup_is_allowlisted_without_otp(self):
         with self.assertRaises(AuthorizationError):
-            database.create_admin_with_email_otp(
+            database.create_allowlisted_admin(
+                self.db_path,
+                "New Admin",
+                "outside@example.edu",
+                hash_password("new-admin-password-123"),
+                "approved@example.edu",
+            )
+        with self.assertRaises(AuthorizationError):
+            database.create_allowlisted_admin(
                 self.db_path,
                 "New Admin",
                 "new-admin@example.edu",
                 hash_password("new-admin-password-123"),
-                "99999999",
-                allowlist,
-                secret,
-                now=1001,
+                "",
             )
-        with database.connection(self.db_path) as conn:
-            self.assertEqual(
-                conn.execute(
-                    "SELECT attempts_left FROM admin_signup_otps WHERE email=?",
-                    ("new-admin@example.edu",),
-                ).fetchone()[0],
-                4,
+        with self.assertRaises(sqlite3.IntegrityError):
+            database.create_allowlisted_admin(
+                self.db_path,
+                "Other Student",
+                "other@example.edu",
+                hash_password("different-password-123"),
+                "other@example.edu",
             )
-        admin = database.create_admin_with_email_otp(
+        self.assertEqual(
+            database.find_user_by_email(self.db_path, "other@example.edu")["role"],
+            "student",
+        )
+        admin = database.create_allowlisted_admin(
             self.db_path,
             "New Admin",
-            "new-admin@example.edu",
+            " New-Admin@example.edu ",
             hash_password("new-admin-password-123"),
-            code,
-            allowlist,
-            secret,
-            now=1002,
+            "other@example.edu, new-admin@example.edu",
         )
         self.assertEqual(admin["role"], "admin")
-        with self.assertRaises(AuthorizationError):
-            database.create_admin_with_email_otp(
-                self.db_path,
-                "Again",
-                "new-admin@example.edu",
-                hash_password("another-password-123"),
-                code,
-                allowlist,
-                secret,
-                now=1003,
-            )
 
-    def test_admin_signup_otp_rate_limit_and_expiration(self):
-        secret = "test-only-otp-hmac-secret-with-32-bytes"
-        allowlist = ["new-admin@example.edu"]
-        with patch("database.secrets.randbelow", return_value=1234):
-            code = database.issue_admin_signup_otp(
-                self.db_path, allowlist[0], allowlist, secret, now=1000
-            )
+    def test_migration_removes_legacy_admin_signup_otp_table(self):
+        with database.connection(self.db_path) as conn:
             self.assertIsNone(
-                database.issue_admin_signup_otp(
-                    self.db_path, allowlist[0], allowlist, secret, now=1030
-                )
+                conn.execute(
+                    "SELECT name FROM sqlite_master "
+                    "WHERE type='table' AND name='admin_signup_otps'"
+                ).fetchone()
             )
             self.assertEqual(
-                database.issue_admin_signup_otp(
-                    self.db_path, allowlist[0], allowlist, secret, now=1060
-                ),
-                "00001234",
-            )
-        with self.assertRaises(AuthorizationError):
-            database.create_admin_with_email_otp(
-                self.db_path,
-                "New Admin",
-                allowlist[0],
-                hash_password("new-admin-password-123"),
-                "00001234",
-                allowlist,
-                secret,
-                now=1660,
-            )
-        with self.assertRaises(AuthorizationError):
-            database.create_admin_with_email_otp(
-                self.db_path,
-                "New Admin",
-                "outside@example.edu",
-                hash_password("new-admin-password-123"),
-                code,
-                allowlist,
-                secret,
-                now=1661,
+                conn.execute("SELECT MAX(version) FROM schema_version").fetchone()[0],
+                3,
             )
 
     def test_qr_tokens_are_private_and_revocable(self):
